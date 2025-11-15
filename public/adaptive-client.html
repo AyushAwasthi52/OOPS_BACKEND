@@ -17,12 +17,12 @@
   </head>
   <body>
     <h2>Adaptive Q&A Tester</h2>
-    <p class="muted">Temporary frontend to test the cookie-based adaptive flow at <code>/api/adaptive</code>. Uses browser speech-to-text for up to 90 seconds per question.</p>
+    <p class="muted">Temporary frontend to test the cookie-based adaptive flow at <code>/api/adaptive</code>. Questions are read aloud automatically, and the microphone starts automatically after each question. Uses browser speech-to-text for up to 90 seconds per question.</p>
 
     <div class="row">
       <button id="btn-new-q">Get Question</button>
       <button id="btn-start-mic">Start Mic (90s)</button>
-      <button id="btn-stop-mic" disabled>Stop Mic</button>
+      <button id="btn-stop-mic" disabled>Stop All</button>
       <button id="btn-submit-text">Submit Typed Answer</button>
     </div>
 

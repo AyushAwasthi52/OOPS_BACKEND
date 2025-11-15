@@ -249,6 +249,11 @@ ${previousResponse ? `Previous Response Performance: ${JSON.stringify({
 
 Previous Question: ${previousResponse.previous_question}
 Previous Answer: ${previousResponse.previous_answer}
+${previousResponse.focus_hint ? `Focus Hint: ${previousResponse.focus_hint}` : ''}
+${previousResponse.recent_questions?.length ? `Recent Questions (do NOT repeat verbatim):
+${previousResponse.recent_questions.map((q, idx) => `${idx + 1}. ${q}`).join('\n')}` : ''}
+${previousResponse.force_variation ? 'IMPORTANT: The last generated question repeated the previous prompt. Produce a meaningfully different, fresh question this time.' : ''}
+${previousResponse.variation_note ? previousResponse.variation_note : ''}
 
 Instruction: Focus the next question to reinforce the missed_key_points and avoid repeating the same exact problem statement. Introduce a slight variation or a new subtopic within the same topic to assess the missed areas.` : 'This is the first question.'}
 
@@ -322,20 +327,166 @@ Return ONLY the JSON object.`;
       console.error('Error generating adaptive question:', error);
       
       // Return a fallback question
-      return {
-        question_id: `Q${Date.now()}${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
-        question_text: `Explain the concept of ${currentTopic} in the context of software development. What are the key aspects you would consider?`,
-        expected_key_points: [
-          'Concept definition',
-          'Key characteristics',
-          'Use cases or applications',
-          'Important considerations'
-        ],
-        difficulty: currentDifficulty,
-        domain: currentTopic,
-        reasoning: 'Fallback question due to API error'
-      };
+      return this.buildFallbackQuestion(currentTopic, currentDifficulty, previousResponse);
     }
+  }
+
+  async generateContextualFeedback({ question, answer, evaluation, coveredKeyPoints, missedKeyPoints, difficulty, domain }) {
+    try {
+      const prompt = `
+You are a concise, professional technical interviewer. Craft feedback for the candidate's last response using the following data:
+
+Question: ${question}
+Answer: ${answer}
+Domain: ${domain}
+Difficulty: ${difficulty}
+Scores: ${JSON.stringify(evaluation)}
+Covered Points: ${JSON.stringify(coveredKeyPoints)}
+Missed Points: ${JSON.stringify(missedKeyPoints)}
+
+Output 2-3 sentences:
+1) Acknowledge strengths or what was handled well.
+2) Call out the most critical gap(s) referencing the missed points when relevant.
+3) Suggest a concrete next-step the candidate should focus on in the following question.
+
+Tone guidelines: calm, specific, and actionable. Do NOT return JSON—just plain text.`;
+
+      const response = await axios.post(
+        `${this.apiUrl}?key=${this.apiKey}`,
+        {
+          contents: [{
+            parts: [{
+              text: prompt
+            }]
+          }],
+          generationConfig: {
+            temperature: 0.4,
+            topK: 32,
+            topP: 0.9,
+            maxOutputTokens: 256,
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000
+        }
+      );
+
+      return response.data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+    } catch (error) {
+      console.error('Error generating contextual feedback:', error.response?.data || error.message);
+      return null;
+    }
+  }
+
+  async suggestNextQuestionPlan(context) {
+    try {
+      const prompt = `
+You are orchestrating an adaptive technical interview. Based on the context below, recommend the next topic and difficulty so the interviewer can naturally adapt.
+
+Context JSON:
+${JSON.stringify(context, null, 2)}
+
+Return ONLY valid JSON in this shape:
+{
+  "topic": "data_structures",
+  "difficulty": "medium",
+  "reason": "why this step makes sense",
+  "focus_hint": "one sentence the interviewer can keep in mind for the next question"
+}
+
+Rules:
+- Topic must be one of: ["data_structures","algorithms","system_design","database","networking","security"].
+- Difficulty must be one of: ["easy","medium","hard"].
+- If candidate missed key points, keep topic aligned with those gaps.
+- If they performed strongly twice in a row, consider increasing difficulty or rotating to a related topic.
+- Keep reason <= 2 sentences.
+- focus_hint should mention the skill or concept we want to probe next.`;
+
+      const response = await axios.post(
+        `${this.apiUrl}?key=${this.apiKey}`,
+        {
+          contents: [{
+            parts: [{
+              text: prompt
+            }]
+          }],
+          generationConfig: {
+            temperature: 0.35,
+            topK: 32,
+            topP: 0.9,
+            maxOutputTokens: 256,
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000
+        }
+      );
+
+      const generatedText = response.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const jsonMatch = generatedText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          topic: parsed.topic,
+          difficulty: parsed.difficulty,
+          reason: parsed.reason,
+          focus_hint: parsed.focus_hint
+        };
+      }
+
+      return null;
+    } catch (error) {
+      console.error('Error suggesting next question plan:', error.response?.data || error.message);
+      return null;
+    }
+  }
+
+  buildFallbackQuestion(topic, difficulty, previousResponse) {
+    const templates = [
+      {
+        question: `Walk through how you would diagnose and fix a production incident rooted in ${topic}. Highlight the telemetry you'd inspect, how you'd isolate the fault, and how you'd prevent regressions.`,
+        key_points: ['Signal and telemetry plan', 'Isolation strategy', 'Long-term prevention']
+      },
+      {
+        question: `Design a feature that relies heavily on ${topic} and must scale to millions of users. Describe the core components, how data flows through them, and the trade-offs you accept.`,
+        key_points: ['Component decomposition', 'Data flow & scalability', 'Trade-off justification']
+      },
+      {
+        question: `Compare two distinct approaches to implementing ${topic}. When would you pick each, and what risks do they introduce?`,
+        key_points: ['Approach comparison', 'Selection criteria', 'Risk analysis']
+      },
+      {
+        question: `Explain how you'd extend an existing platform with ${topic} support without downtime. Cover rollout strategy, testing, and rollback considerations.`,
+        key_points: ['Incremental rollout', 'Testing strategy', 'Rollback/mitigation']
+      }
+    ];
+
+    const recent = new Set(
+      (previousResponse?.recent_questions || [])
+        .map(text => (text || '').trim().toLowerCase())
+    );
+
+    let choice = templates.find(t => !recent.has((t.question || '').trim().toLowerCase()));
+    if (!choice) {
+      choice = templates[Math.floor(Math.random() * templates.length)];
+    }
+
+    const interpolatedQuestion = choice.question.replace(/\${topic}/gi, topic);
+
+    return {
+      question_id: `Q${Date.now()}${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
+      question_text: interpolatedQuestion,
+      expected_key_points: choice.key_points,
+      difficulty,
+      domain: topic,
+      reasoning: 'Fallback question due to API error'
+    };
   }
 }
 
